@@ -775,11 +775,14 @@ class BloksMixin:
             },
         }
         attest_params = self.attestation_params()
+        extra_headers = {"X-Meta-Zca": self.zca_header()}
+        if attest_params:
+            extra_headers["X-IG-Attest-Params"] = attest_params
         return self.bloks_async_action(
             "com.bloks.www.bloks.caa.login.async.send_login_request",
             params,
             bloks_versioning_id=bloks_versioning_id,
-            extra_headers={"X-IG-Attest-Params": attest_params} if attest_params else None,
+            extra_headers=extra_headers,
             login=True,
         )
 

@@ -95,6 +95,20 @@ class DeviceAttestationRegressionTestCase(unittest.TestCase):
         client = self.build_client()
         self.assertEqual(client.attestation_params(), "")
 
+    def test_zca_header_reports_time_hash_without_signing(self):
+        client = self.build_client()
+        value = json.loads(base64.b64decode(client.zca_header()))
+        android = value["android"]
+        aka = android["aka"]
+        data_to_sign = json.loads(aka["dataToSign"])
+        self.assertTrue(data_to_sign["time"].isdigit())
+        digest = SHA256.new(data_to_sign["time"].encode()).digest()
+        expected_hash = base64.urlsafe_b64encode(digest).decode().rstrip("=")
+        self.assertEqual(data_to_sign["hash"], expected_hash)
+        self.assertEqual(aka["signedData"], "")
+        self.assertEqual(aka["keyHash"], "")
+        self.assertEqual(android["gpia"], {"token": "", "errors": ["PLAY_INTEGRITY_DISABLED_BY_CONFIG"]})
+
     def test_attestation_create_android_keystore_stores_nonces(self):
         client = self.build_client()
         response = {"challenge_nonce": "chal", "key_nonce": "keyn", "status": "ok"}
@@ -218,6 +232,8 @@ class CaaLoginRegressionTestCase(unittest.TestCase):
         self.assertIn("X-IG-Attest-Params", captured["headers"])
         attest = json.loads(captured["headers"]["X-IG-Attest-Params"])
         self.assertEqual(attest["attestation"][0]["challenge_nonce"], "chal-nonce")
+        self.assertIn("X-Meta-Zca", captured["headers"])
+        json.loads(base64.b64decode(captured["headers"]["X-Meta-Zca"]))  # decodes without raising
 
     def test_bloks_caa_login_applies_embedded_login_response(self):
         client = self.build_client()

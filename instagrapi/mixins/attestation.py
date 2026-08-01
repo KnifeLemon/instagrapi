@@ -19,6 +19,9 @@ USDID_REFRESH_MARGIN = 300
 # Error the app reports when it cannot sign the keystore challenge nonce.
 # Instagram accepts the login even when attestation is in this error state.
 ATTESTATION_KEYSTORE_ERROR = -1013
+# Error the app reports in X-Meta-Zca when Play Integrity is unavailable
+# (e.g. no Google Play Services). Instagram accepts logins in this state too.
+ZCA_PLAY_INTEGRITY_ERROR = "PLAY_INTEGRITY_DISABLED_BY_CONFIG"
 
 
 def _b64u(raw: bytes) -> str:
@@ -34,6 +37,12 @@ class DeviceAttestationMixin:
     (``X-Ig-Attest-Params``) needs a hardware-backed key that cannot be
     reproduced, but Instagram accepts the request while attestation reports the
     error state, so only the server-issued ``challenge_nonce`` is required.
+
+    ``X-Meta-Zca`` reports the same "no keystore key available" state: the
+    ``aka`` block always carries a timestamp/hash pair but no signature (no
+    keystore key was ever uploaded, matching ``key_hash`` staying empty
+    everywhere else), and ``gpia`` reports Play Integrity as unavailable
+    instead of fabricating a Google-signed token.
     """
 
     usdid = ""
@@ -274,3 +283,40 @@ class DeviceAttestationMixin:
                 ]
             }
         )
+
+    def zca_header(self) -> str:
+        """
+        Build the ``X-Meta-Zca`` header value.
+
+        ``dataToSign`` is ``{"time": <current ms>, "hash": sha256(time)}``,
+        which the app signs with its keystore key. No keystore key was ever
+        uploaded (see :meth:`attestation_create_android_keystore`), so
+        ``signedData``/``keyHash`` stay empty here too, and ``gpia`` reports
+        Play Integrity as unavailable instead of a fabricated Google token.
+
+        Returns
+        -------
+        str
+            Base64-encoded header value.
+        """
+        now_ms = str(int(time.time() * 1000))
+        data_to_sign = dumps({"time": now_ms, "hash": _b64u(SHA256.new(now_ms.encode()).digest())})
+        payload = {
+            "android": {
+                "aka": {
+                    "dataToSign": data_to_sign,
+                    "signedData": "",
+                    "keyHash": "",
+                    "lastUploadedKeyTimeMs": 0,
+                },
+                "gpia": {"token": "", "errors": [ZCA_PLAY_INTEGRITY_ERROR]},
+                "payload": {
+                    "plugins": {
+                        "bat": {"sta": "Unknown", "lvl": 0},
+                        "sct": {},
+                        "adb": {"usb": -1, "adb": 0, "usb_adb": -1},
+                    }
+                },
+            }
+        }
+        return base64.b64encode(dumps(payload).encode()).decode()
