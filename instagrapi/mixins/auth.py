@@ -18,6 +18,7 @@ from instagrapi import config
 from instagrapi.exceptions import (
     BadCredentials,
     BadPassword,
+    ChallengeRequired,
     ClientError,
     ClientThrottledError,
     LoginRequired,
@@ -61,6 +62,15 @@ class PreLoginFlowMixin:
         # self.set_contact_point_prefill("prefill")
         self.sync_launcher(True)
         # self.sync_device_features(True)
+        # Register the device USDID signing key so every request carries the
+        # signed X-Meta-Usdid header the current app sends before login. This is
+        # best effort: a failure here must not block the login attempt.
+        if not self.usdid_registered:
+            try:
+                self.usdid_generate()
+                self.usdid_register()
+            except Exception as exc:  # noqa: BLE001 - preflight step is optional
+                self.logger.warning("USDID registration skipped: %s", exc)
         return True
 
     def get_prefill_candidates(self, login: bool = False) -> Dict:
@@ -591,6 +601,39 @@ class LoginMixin(PreLoginFlowMixin, PostLoginFlowMixin):
             **self._exception_context(login_json),
         ) from exc
 
+    def _try_caa_login(self, exc: Exception, verification_code: str = "") -> bool:
+        """
+        Attempt the full CAA/Bloks login after the legacy endpoint fails.
+
+        The current app logs in through the CAA flow with a signed
+        ``X-Meta-Usdid`` header and a server-issued account access context; the
+        legacy ``accounts/login/`` endpoint sends neither and can answer
+        ``bad_password`` for otherwise valid credentials. This runs that flow as
+        a fallback and returns whether it produced a session. When Instagram
+        requires the "Verify your profile" code challenge, the CAA flow resolves
+        it using ``verification_code`` or ``Client.challenge_code_handler``.
+
+        Raises
+        ------
+        TwoFactorRequired
+            When the CAA flow reports that two-factor verification is required.
+        """
+        try:
+            outcome = self.bloks_caa_login(verification_code=verification_code)
+        except ClientError as caa_exc:
+            self.logger.warning("CAA login fallback failed: %s", caa_exc)
+            return False
+        if outcome.get("logged_in"):
+            return True
+        context = outcome.get("two_step_verification_context")
+        if context:
+            raise TwoFactorRequired(
+                f"{exc} (Instagram returned a Bloks two-factor context from the "
+                "CAA login flow; provide verification_code for login)",
+                response=getattr(exc, "response", None),
+            ) from exc
+        return False
+
     def _login_with_caa_bloks_two_factor(self, verification_code: str, password: str, exc: Exception) -> bool:
         try:
             caa_result = self.bloks_caa_login_send_request(password, login_attempt_count=1)
@@ -674,6 +717,7 @@ class LoginMixin(PreLoginFlowMixin, PostLoginFlowMixin):
         self.mid = self.settings.get("mid", self.cookie_dict.get("mid"))
         self.set_ig_u_rur(self.settings.get("ig_u_rur"))
         self.set_ig_www_claim(self.settings.get("ig_www_claim"))
+        self.set_usdid_settings(self.settings.get("usdid"))
         # init headers
         headers = self.base_headers
         if self.authorization:
@@ -820,6 +864,12 @@ class LoginMixin(PreLoginFlowMixin, PostLoginFlowMixin):
             login_json = deepcopy(self.last_json) if isinstance(self.last_json, dict) else {}
             context = self._extract_two_step_verification_context(login_json)
             if not context and not verification_code.strip():
+                caa_logged = self._try_caa_login(exc)
+                if caa_logged:
+                    self.login_flow()
+                    self.last_login = time.time()
+                    self.relogin_attempt = 0
+                    return True
                 raise
             if not verification_code.strip():
                 raise TwoFactorRequired(
@@ -827,12 +877,31 @@ class LoginMixin(PreLoginFlowMixin, PostLoginFlowMixin):
                     response=getattr(exc, "response", None),
                     **self._exception_context(login_json),
                 ) from exc
-            if not context and self._login_response_requires_recovery(login_json):
-                raise
             if context:
                 logged = self._login_with_bloks_two_factor(verification_code, login_json, exc)
             else:
+                # The current app answers with the CAA "Verify your profile" code
+                # challenge; resolve it with the provided code before falling back
+                # to the older CAA/Bloks two-factor path.
+                if self._try_caa_login(exc, verification_code=verification_code):
+                    self.login_flow()
+                    self.last_login = time.time()
+                    self.relogin_attempt = 0
+                    return True
+                if self._login_response_requires_recovery(login_json):
+                    raise
                 logged = self._login_with_caa_bloks_two_factor(verification_code, self.password, exc)
+        except ChallengeRequired as exc:
+            # The legacy endpoint answers new-device logins with a native-flow
+            # checkpoint that instagrapi cannot drive. The current app instead
+            # logs in through the CAA flow, whose "Verify your profile" code
+            # challenge is resolvable; route there before giving up.
+            if not self._try_caa_login(exc, verification_code=verification_code):
+                raise
+            self.login_flow()
+            self.last_login = time.time()
+            self.relogin_attempt = 0
+            return True
         except TwoFactorRequired as e:
             if not verification_code.strip():
                 raise TwoFactorRequired(f"{e} (you did not provide verification_code for login method)")
@@ -999,6 +1068,9 @@ class LoginMixin(PreLoginFlowMixin, PostLoginFlowMixin):
         }
         if self.settings.get("fbns_auth"):
             settings["fbns_auth"] = self.settings["fbns_auth"]
+        usdid_settings = self.get_usdid_settings()
+        if usdid_settings:
+            settings["usdid"] = usdid_settings
         return settings
 
     def set_settings(self, settings: Dict) -> bool:

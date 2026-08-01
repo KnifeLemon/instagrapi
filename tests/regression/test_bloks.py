@@ -29,6 +29,7 @@ class BloksRegressionTestCase(unittest.TestCase):
             },
             with_signature=False,
             headers={"X-FB-Friendly-Name": "IgApi: bloks/async_action/com.example.action/"},
+            login=False,
         )
 
     def test_bloks_async_action_accepts_domain_override(self):
@@ -50,6 +51,7 @@ class BloksRegressionTestCase(unittest.TestCase):
             },
             with_signature=False,
             headers={"X-FB-Friendly-Name": "IgApi: bloks/async_action/com.example.action/"},
+            login=False,
             domain="b.i.instagram.com",
         )
 
@@ -92,6 +94,7 @@ class BloksRegressionTestCase(unittest.TestCase):
                 "bloks_versioning_id": "bloks-version",
             },
             with_signature=False,
+            login=False,
         )
 
     def test_bloks_graphql_app_posts_wrapped_bloks_payload(self):
